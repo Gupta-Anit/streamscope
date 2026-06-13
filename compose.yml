@@ -1,0 +1,141 @@
+# services: top-level block. Each entry below is one container.
+services:
+
+  # ─── KAFKA (single-node, KRaft mode, no Zookeeper) ─────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0      # Confluent Kafka image; supports KRaft from 7.4+
+    container_name: kafka                   # fixed name so other services reach it as "kafka"
+    hostname: kafka                         # DNS name inside the docker network
+    ports:
+      - "9092:9092"                         # host:9092 -> container:9092 (your Mac talks here)
+    environment:
+      # ─ identity ─
+      KAFKA_NODE_ID: 1                      # unique broker ID. Single broker -> 1.
+      KAFKA_PROCESS_ROLES: broker,controller  # In KRaft a node can be broker, controller, or both.
+                                              # Single-node = both roles in one process.
+
+      # ─ listeners ─
+      # Listeners = addresses Kafka BINDS to inside the container.
+      # Three listeners on three ports:
+      #   PLAINTEXT      :29092  -> clients INSIDE the docker network (flink, producer)
+      #   PLAINTEXT_HOST :9092   -> clients on your Mac (kafka CLI, debugging)
+      #   CONTROLLER     :9093   -> KRaft controller traffic (internal only)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+
+      # ADVERTISED_LISTENERS = the address Kafka TELLS clients to connect back on.
+      # When a client first connects, Kafka responds "actually, talk to me at <advertised>".
+      # If this is wrong, your producer connects, gets redirected somewhere unreachable, and hangs.
+      # Inside docker -> kafka:29092. From your Mac -> localhost:9092. Must match the listeners above.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+
+      # Maps each listener name to a security protocol. Plain TCP everywhere (dev only).
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+
+      # Which listener brokers use to talk to each other (only one broker here, so nominal).
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Which listener is for KRaft controller traffic.
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # The controller quorum: "node 1 reachable at kafka:9093". KRaft's equivalent of the ZK ensemble.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # ─ replication factors (must be <= number of brokers) ─
+      # The internal __consumer_offsets topic. Default 3, we only have 1 broker.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Internal transaction-state topic (used by transactional / exactly-once producers).
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      # ─ misc ─
+      # Default is 3000ms wait for more consumers before initial rebalance. We want fast startup.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Stable cluster identity. Any 22-char base64 string. Hard-coded so restarts preserve identity.
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+
+    # Healthcheck: ask Kafka to list topics. If that works, Kafka is up.
+    # Services that depends_on kafka with condition: service_healthy will wait for this.
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      interval: 10s        # check every 10s
+      timeout: 5s          # each check fails after 5s
+      retries: 10          # mark unhealthy after 10 failed checks (~100s)
+
+  # ─── MINIO (S3-compatible object store, local stand-in for AWS S3) ─────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    hostname: minio
+    # server /data         = run as MinIO server, store objects under /data inside the container.
+    # --console-address    = serve the web UI on port 9001.
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"        # S3 API port. Iceberg, Flink, Trino talk here.
+      - "9001:9001"        # Web UI port. You open this in a browser.
+    environment:
+      MINIO_ROOT_USER: minioadmin       # admin username
+      MINIO_ROOT_PASSWORD: minioadmin   # admin password (dev only; never in prod!)
+    volumes:
+      # Named volume mounts /data to disk. Survives `docker compose down`. Wiped by `down -v`.
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── MINIO-INIT (one-shot bucket creator) ──────────────────────────────
+  # Runs once, creates the bucket Iceberg will need, then exits cleanly. Idempotent.
+  minio-init:
+    image: minio/mc:latest          # the MinIO Client CLI
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_started  # don't run until minio container has started
+    # Entrypoint as a YAML list: 3 elements (/bin/sh, -c, the script).
+    # The `|` is YAML's literal-scalar indicator: newlines preserved exactly as written.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 3                                                       # let minio settle
+        mc alias set local http://minio:9000 minioadmin minioadmin    # register an alias 'local'
+        mc mb --ignore-existing local/streamscope                     # make bucket (no-op if exists)
+        mc anonymous set download local/streamscope                   # allow anonymous reads (dev only)
+        echo 'bucket ready'                                           # log success; container exits 0
+
+  # ─── ICEBERG REST CATALOG ──────────────────────────────────────────────
+  # Tracks tables, schemas, and metadata pointers. Backed by MinIO for storage.
+  # Catalog state itself is in-memory (lost on container restart). Tables persist in MinIO,
+  # but you'll need to re-register them via Flink/Trino DDL after a `docker compose down`.
+  # For production: swap to JDBC catalog backed by Postgres. Out of scope for this weekend.
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:latest    # Apache's official lightweight REST catalog
+    container_name: iceberg-rest
+    hostname: iceberg-rest                        # other services reach it as "iceberg-rest:8181"
+    ports:
+      - "8181:8181"                               # REST API port; standard for Iceberg REST
+    depends_on:
+      minio:
+        condition: service_healthy                # wait until MinIO is fully up
+      minio-init:
+        condition: service_completed_successfully # wait until the bucket exists (Exited 0)
+    environment:
+      # ─ AWS SDK credentials (MinIO speaks the S3 protocol) ─
+      AWS_ACCESS_KEY_ID: minioadmin               # matches MINIO_ROOT_USER
+      AWS_SECRET_ACCESS_KEY: minioadmin           # matches MINIO_ROOT_PASSWORD
+      AWS_REGION: us-east-1                       # MinIO ignores this but the SDK requires it
+
+      # ─ Catalog properties ─
+      # Env vars prefixed CATALOG_ are translated into Iceberg catalog properties.
+      # Single underscore stays a separator; DOUBLE underscore becomes a dot.
+      # So CATALOG_IO__IMPL -> the `io-impl` catalog property.
+
+      CATALOG_WAREHOUSE: s3://streamscope/warehouse  # all Iceberg data lives under this prefix
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO  # use AWS S3 client (works with MinIO)
+      CATALOG_S3_ENDPOINT: http://minio:9000        # point the S3 client at MinIO instead of AWS
+
+# ─── VOLUMES ──────────────────────────────────────────────────────────────
+volumes:
+  minio_data:
