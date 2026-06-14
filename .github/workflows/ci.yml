@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: producer/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r producer/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run producer tests
+        run: pytest tests/ -v --cov=producer --cov-report=term
+
+  validate:
+    name: Validate compose.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker compose config
+        run: docker compose config > /dev/null
+
+      - name: Print compose service list
+        run: docker compose config --services

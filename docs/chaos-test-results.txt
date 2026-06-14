@@ -1,0 +1,23 @@
+=== Before chaos ===
+"1401"
+"29"
+"2026-06-14 16:03:00.000000"
+=== Killing TaskManager at Sun Jun 14 12:05:03 EDT 2026 ===
+=== Restarting TaskManager at Sun Jun 14 12:09:44 EDT 2026 ===
+{
+    "taskmanagers": 1,
+    "slots-total": 4,
+    "slots-available": 3,
+    "jobs-running": 1,
+    "jobs-finished": 0,
+    "jobs-cancelled": 0,
+    "jobs-failed": 0,
+    "flink-version": "1.18.1",
+    "flink-commit": "a8c8b1c"
+}
+=== After chaos ===
+"1655"
+"33"
+"2026-06-14 16:10:00.000000"
+--- duplicate check (expect ZERO rows) ---
+(empty above = no duplicates = exactly-once held)

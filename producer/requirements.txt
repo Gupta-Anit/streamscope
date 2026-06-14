@@ -1,0 +1,11 @@
+# Kafka client — the librdkafka Python binding. What production uses.
+# Significantly faster and more featureful than pure-python kafka-python.
+confluent-kafka==2.5.3
+
+# SSE client — long-lived HTTP connection with auto-reconnect on disconnect.
+# The older "sseclient" lib (not sseclient-py) auto-reconnects out of the box,
+# which is what we want for Wikimedia's ~15-min connection drops.
+sseclient==0.0.27
+
+# Needed transitively for HTTPS + SSE
+urllib3<2

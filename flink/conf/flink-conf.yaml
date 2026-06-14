@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════
+# MEMORY (REQUIRED in Flink 1.18+ — process MUST exit if these are absent)
+# ═══════════════════════════════════════════════════════════════════════
+# Total process memory = heap + off-heap + metaspace + network + managed.
+# These values are the defaults from the stock Flink image — sane for local dev.
+# For production, you'd tune taskmanager.memory.process.size based on workload.
+jobmanager.memory.process.size: 1600m
+taskmanager.memory.process.size: 1728m
+
+# ═══════════════════════════════════════════════════════════════════════
+# CLUSTER ADDRESSING
+# ═══════════════════════════════════════════════════════════════════════
+jobmanager.rpc.address: flink-jobmanager     # TaskManagers connect here
+jobmanager.bind-host: 0.0.0.0
+jobmanager.rpc.port: 6123
+
+rest.address: 0.0.0.0
+rest.bind-host: 0.0.0.0
+rest.port: 8081                              # Web UI / REST API → localhost:8081
+
+taskmanager.bind-host: 0.0.0.0
+taskmanager.host: flink-taskmanager
+taskmanager.numberOfTaskSlots: 4             # up to 4 parallel subtasks per TM
+parallelism.default: 1                       # default for new jobs
+
+# ═══════════════════════════════════════════════════════════════════════
+# CHECKPOINTING (foundation of exactly-once)
+# ═══════════════════════════════════════════════════════════════════════
+execution.checkpointing.interval: 30s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.min-pause: 5s
+execution.checkpointing.timeout: 10min
+
+# ─── State backend ───
+state.backend.type: rocksdb                  # on-disk state (handles state > RAM)
+state.backend.incremental: true              # only ship changed bytes per checkpoint
+
+# Where checkpoints + savepoints land. s3:// handled by the s3-fs-hadoop plugin.
+state.checkpoints.dir: s3://streamscope/checkpoints
+state.savepoints.dir: s3://streamscope/savepoints
+
+# ═══════════════════════════════════════════════════════════════════════
+# S3 / MINIO (used by the s3-fs-hadoop plugin for checkpoints)
+# Iceberg's own S3 config is set per-table via CREATE TABLE properties.
+# ═══════════════════════════════════════════════════════════════════════
+s3.endpoint: http://minio:9000
+s3.path.style.access: true                   # MinIO requires path-style URLs
+s3.access-key: minioadmin
+s3.secret-key: minioadmin
